@@ -1,0 +1,12 @@
+# Entorno y compilados
+.venv/
+__pycache__/
+*.pyc
+
+# Salidas y datos de pagos: no van al repositorio
+cep_error.log
+cep_resultados.csv
+cuentas_conocidas.json
+*.xlsx
+*.xls
+*.pdf

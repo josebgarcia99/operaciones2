@@ -1,0 +1,21 @@
+streamlit>=1.49.0
+pandas>=2.2.0
+numpy>=1.26.0
+
+# Lectura de PDF y OCR
+pymupdf>=1.24.0
+pypdf>=4.2.0
+pdfplumber>=0.11.0
+Pillow>=10.0.0
+rapidocr-onnxruntime>=1.3.24
+pytesseract>=0.3.10
+
+# Base de tarjetas en .xls viejo (OLE2). Los .xlsx se LEEN directo del XML,
+# sin openpyxl; openpyxl sólo se usa para ESCRIBIR el concentrado.
+xlrd>=2.0.1
+openpyxl>=3.1.0
+
+# Consulta del CEP en el portal de Banxico.
+# Después de instalarlo hace falta bajar el navegador:
+#     python -m playwright install chromium
+playwright>=1.44.0
