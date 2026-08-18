@@ -10,8 +10,9 @@ distingue al panel de SIO:
   * el pie con la razón social.
 
 La paleta es la de `sio_islas/app/globals.css`, que a su vez sale de
-`sio-tracking`: navy #1b2958 y azul de acción #003da6. Igual que allá, el
-modo oscuro se decide con `prefers-color-scheme` y no con un interruptor.
+`sio-tracking`: navy #1b2958 y azul de acción #003da6. El modo oscuro sigue
+al que tenga puesto Streamlit, no al del sistema operativo: ver el bloque de
+`light-dark()` en `_css`.
 """
 
 from __future__ import annotations
@@ -88,6 +89,7 @@ def _css() -> str:
     --sio-ink: #16233f;
     --sio-ink-soft: #5b6781;
     --sio-ink-muted: #8f98ab;
+    --sio-titulo: #1b2958;
 
     --sio-shadow-sm: 0 1px 2px rgba(27, 41, 88, 0.06);
     --sio-shadow: 0 2px 8px rgba(27, 41, 88, 0.08);
@@ -104,27 +106,44 @@ def _css() -> str:
     --sio-logo-h: 52px;
 }}
 
-@media (prefers-color-scheme: dark) {{
-    :root {{
-        --sio-navy: #101a33;
-        --sio-navy-700: #1b2a4d;
+/* Modo oscuro.
+   Streamlit elige su tema por su cuenta —lo que diga config.toml, lo que el
+   usuario marque en el menú de la app o, sólo si ambos callan, el del
+   sistema— y lo anuncia poniendo `color-scheme` en su carcasa. De ahí que la
+   paleta cuelgue de `light-dark()` y de ese elemento: así el oscuro de SIO
+   entra y sale junto con el de Streamlit.
 
-        --sio-surface: #0b1020;
-        --sio-card: #141b2d;
-        --sio-line: #26304a;
-        --sio-line-soft: #1d2539;
+   Antes esto era un `prefers-color-scheme`, que pregunta por el sistema
+   operativo y no por la app: bastaba con elegir «Dark» en el menú teniendo el
+   equipo en claro para quedarse con las tarjetas blancas y los títulos en
+   azul marino sobre el lienzo oscuro.
 
-        --sio-ink: #e8ecf6;
-        --sio-ink-soft: #a7b0c4;
-        --sio-ink-muted: #7b859c;
+   Los valores de arriba se quedan como respaldo: un navegador que no entienda
+   `light-dark()` descarta estas líneas y se queda en claro, que se lee bien
+   igual. */
+[data-testid="stApp"] {{
+    --sio-navy: light-dark(#1b2958, #101a33);
+    --sio-navy-700: light-dark(#223466, #1b2a4d);
 
-        --sio-blue-050: #16224a;
-        --sio-blue-100: #1d2f63;
+    --sio-surface: light-dark(#f5f9ff, #0b1020);
+    --sio-card: light-dark(#ffffff, #141b2d);
+    --sio-line: light-dark(#e4e9f2, #26304a);
+    --sio-line-soft: light-dark(#eef1f7, #1d2539);
 
-        --sio-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
-        --sio-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
-        --sio-shadow-lg: 0 12px 28px rgba(0, 0, 0, 0.5);
-    }}
+    --sio-ink: light-dark(#16233f, #e8ecf6);
+    --sio-ink-soft: light-dark(#5b6781, #a7b0c4);
+    --sio-ink-muted: light-dark(#8f98ab, #7b859c);
+
+    --sio-blue-050: light-dark(#eef4ff, #16224a);
+    --sio-blue-100: light-dark(#d6e4ff, #1d2f63);
+
+    --sio-shadow-sm: 0 1px 2px light-dark(rgba(27, 41, 88, 0.06), rgba(0, 0, 0, 0.4));
+    --sio-shadow: 0 2px 8px light-dark(rgba(27, 41, 88, 0.08), rgba(0, 0, 0, 0.45));
+    --sio-shadow-lg: 0 12px 28px light-dark(rgba(27, 41, 88, 0.12), rgba(0, 0, 0, 0.5));
+
+    /* Los títulos van en azul marino sobre el lienzo claro; en el oscuro ese
+       azul se hunde en el fondo, así que pasan a la tinta clara. */
+    --sio-titulo: light-dark(#1b2958, #e8ecf6);
 }}
 
 /* ==========================================================================
@@ -223,11 +242,7 @@ header[data-testid="stHeader"] [data-testid="stToolbar"] button:hover {{
     font-weight: 700;
     letter-spacing: -0.01em;
     line-height: 1.25;
-    color: var(--sio-navy);
-}}
-
-@media (prefers-color-scheme: dark) {{
-    .sio-heading__title {{ color: var(--sio-ink); }}
+    color: var(--sio-titulo);
 }}
 
 .sio-heading__subtitle {{
@@ -240,13 +255,8 @@ header[data-testid="stHeader"] [data-testid="stToolbar"] button:hover {{
 /* Los títulos de sección de la app (`st.subheader`) toman el navy de marca */
 [data-testid="stHeading"] h2,
 [data-testid="stHeading"] h3 {{
-    color: var(--sio-navy);
+    color: var(--sio-titulo);
     letter-spacing: -0.01em;
-}}
-
-@media (prefers-color-scheme: dark) {{
-    [data-testid="stHeading"] h2,
-    [data-testid="stHeading"] h3 {{ color: var(--sio-ink); }}
 }}
 
 [data-testid="stCaptionContainer"] {{
@@ -336,12 +346,8 @@ header[data-testid="stHeader"] [data-testid="stToolbar"] button:hover {{
 }}
 
 [data-testid="stMetricValue"] {{
-    color: var(--sio-navy);
+    color: var(--sio-titulo);
     letter-spacing: -0.02em;
-}}
-
-@media (prefers-color-scheme: dark) {{
-    [data-testid="stMetricValue"] {{ color: var(--sio-ink); }}
 }}
 
 [data-testid="stExpander"] details {{
@@ -355,16 +361,12 @@ header[data-testid="stHeader"] [data-testid="stToolbar"] button:hover {{
 [data-testid="stExpander"] summary {{
     font-size: 0.9375rem;
     font-weight: 700;
-    color: var(--sio-navy);
+    color: var(--sio-titulo);
 }}
 
 [data-testid="stExpander"] summary:hover {{
     background: var(--sio-blue-050);
     color: var(--sio-blue);
-}}
-
-@media (prefers-color-scheme: dark) {{
-    [data-testid="stExpander"] summary {{ color: var(--sio-ink); }}
 }}
 
 /* ==========================================================================
