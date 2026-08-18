@@ -9,11 +9,14 @@ import hashlib
 import io
 import json
 import os
+import queue
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import traceback
 import unicodedata
 import zipfile
@@ -1669,8 +1672,142 @@ def build_txt(records) -> str:
     return "\n".join(lines) + ("\n" if lines else "")
 
 
-def consultar_cep(records, visible: bool):
+# Lo que `cep_banxico.py` antepone a cada línea de avance.
+PREFIJO_PROGRESO = "CEP_PROGRESS"
+
+
+def _bombear(flujo, recibir):
+    """Vacía un pipe línea por línea hasta que el otro lado lo cierre.
+
+    Los dos pipes SE TIENEN que ir vaciando aunque no nos interesen: el búfer
+    del sistema operativo es chico, y si se llena el subproceso se queda
+    bloqueado escribiendo y la consulta no avanza nunca.
+    """
+    try:
+        for linea in flujo:
+            recibir(linea)
+    except Exception:  # noqa: BLE001
+        # El pipe se cierra de golpe cuando matamos el proceso; es lo esperado.
+        pass
+
+
+def _correr_consulta(comando, limite, al_avanzar):
+    """Corre cep_banxico.py leyendo su avance en vivo.
+
+    Devuelve (expiro, codigo, stderr). No lee resultados: de eso se encarga
+    quien llama, a partir del JSON.
+    """
+    entorno = dict(os.environ)
+    # Los dos lados del pipe hablando UTF-8: sin esto, en Windows el subproceso
+    # escribe en la codificación local y los estados con acento llegan rotos.
+    entorno["PYTHONIOENCODING"] = "utf-8"
+
+    proceso = subprocess.Popen(
+        comando, cwd=_AQUI,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", errors="replace", bufsize=1,
+        env=entorno,
+    )
+
+    lineas = queue.Queue()
+    stderr_partes = []
+    FIN = object()   # centinela: stdout se cerró
+
+    def recoger_stdout(linea):
+        lineas.put(linea)
+
+    def leer_stdout():
+        try:
+            _bombear(proceso.stdout, recoger_stdout)
+        finally:
+            lineas.put(FIN)
+
+    hilo_out = threading.Thread(target=leer_stdout, daemon=True)
+    hilo_err = threading.Thread(
+        target=_bombear, args=(proceso.stderr, stderr_partes.append), daemon=True)
+    hilo_out.start()
+    hilo_err.start()
+
+    expiro = False
+    vence = time.monotonic() + limite
+    try:
+        while True:
+            restante = vence - time.monotonic()
+            if restante <= 0:
+                expiro = True
+                break
+            try:
+                # El sondeo corto es lo que permite respetar el timeout aunque
+                # el subproceso se quede callado y colgado.
+                linea = lineas.get(timeout=min(restante, 1.0))
+            except queue.Empty:
+                continue
+            if linea is FIN:
+                break
+            _reportar_avance(linea, al_avanzar)
+
+        if not expiro:
+            try:
+                proceso.wait(timeout=max(0.0, vence - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                expiro = True
+    finally:
+        # Matar, cosechar y sólo entonces cerrar: si se cierran los pipes con
+        # los hilos todavía leyendo, revientan; y sin el wait() el proceso queda
+        # de zombi. Los hilos son daemon, así que ni aunque se atoren impiden
+        # que Python termine.
+        if proceso.poll() is None:
+            proceso.kill()
+        proceso.wait()
+        hilo_out.join(timeout=5)
+        hilo_err.join(timeout=5)
+        for flujo in (proceso.stdout, proceso.stderr):
+            if flujo is not None:
+                try:
+                    flujo.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+    detalle = "".join(stderr_partes).strip()[-1500:]
+    return expiro, proceso.returncode, detalle
+
+
+def _reportar_avance(linea, al_avanzar):
+    """Traduce una línea de stdout a una llamada de avance, si es que lo es.
+
+    Todo lo que no sea exactamente `CEP_PROGRESS|hechos|total|estado` se ignora
+    en silencio: por stdout puede salir cualquier otra cosa y no queremos que un
+    renglón suelto se confunda con avance.
+    """
+    if al_avanzar is None:
+        return
+    linea = (linea or "").strip()
+    if not linea.startswith(PREFIJO_PROGRESO + "|"):
+        return
+    partes = linea.split("|")
+    if len(partes) != 4:
+        return
+    try:
+        hechos, total = int(partes[1]), int(partes[2])
+    except ValueError:
+        return
+    try:
+        al_avanzar(hechos, total, partes[3])
+    except Exception:  # noqa: BLE001
+        # Que falle el pintado de la barra no puede cancelar la consulta.
+        pass
+
+
+def consultar_cep(records, al_avanzar=None):
     """Consulta en el portal del CEP los renglones que ya están completos.
+
+    `al_avanzar(hechos, total, estado)` se llama conforme `cep_banxico.py` va
+    cerrando pagos, para poder mover una barra de progreso de verdad. El avance
+    llega por stdout del subproceso; los resultados siguen viniendo del JSON.
+
+    Siempre headless: no se abre ninguna ventana de Chrome ni se le pide nada al
+    usuario. Si Banxico saca el captcha, `cep_banxico.py` marca ese pago y sigue
+    con los demás, así que aquí basta con leer los resultados.
 
     Corre `cep_banxico.py` como proceso aparte en vez de llamarlo aquí. Motivo:
     Streamlit deja la política de asyncio en WindowsSelectorEventLoopPolicy, y
@@ -1710,19 +1847,28 @@ def consultar_cep(records, visible: bool):
         "--json-in", ruta_entrada,
         "--json-out", ruta_salida,
     ]
-    if visible:
-        comando.append("--visible")
 
-    proceso = subprocess.run(
-        comando, cwd=_AQUI, capture_output=True, text=True,
-        encoding="utf-8", errors="replace",
-        timeout=120 + 90 * len(pagos),
-    )
+    # El margen fijo cubre el arranque de Playwright y, en el peor caso, las
+    # pausas escalonadas que `cep_banxico.py` toma cuando sale el captcha (unos
+    # tres minutos en total antes de anotar el resto del lote y salir).
+    limite = 300 + 90 * len(pagos)
+
+    # Se usa Popen y no subprocess.run porque hay que leer stdout MIENTRAS el
+    # proceso corre: con run() el avance llegaría cuando ya no sirve de nada.
+    # El log del subproceso se va por stderr, así que stdout trae el avance sin
+    # mezclarse; y los resultados no salen por ninguno de los dos, sino del JSON
+    # que el subproceso deja en disco.
+    expiro, codigo, detalle = _correr_consulta(comando, limite, al_avanzar)
 
     if not os.path.exists(ruta_salida):
-        detalle = (proceso.stderr or proceso.stdout or "").strip()[-1500:]
+        if expiro:
+            raise RuntimeError(
+                "La consulta pasó del tiempo máximo sin alcanzar a resolver ningún "
+                "pago. Vuelve a intentarlo con menos comprobantes, o usa la consulta "
+                "por lotes de Banxico."
+            )
         raise RuntimeError(
-            f"cep_banxico.py terminó con código {proceso.returncode} sin escribir "
+            f"cep_banxico.py terminó con código {codigo} sin escribir "
             f"resultados.\n\n{detalle}"
         )
 
@@ -1888,9 +2034,24 @@ ANCHO_TABLA = _ancho_tabla()
 ESTADO_LEGIBLE = {
     "LIQUIDADO": "Liquidado",
     "NO_ENCONTRADO": "No encontrado",
-    "CAPTCHA": "Falta el captcha",
+    # Dos renglones distintos: al primero Banxico le pidió el captcha; al
+    # segundo ni se le preguntó, porque la tanda venía trabada.
+    "CAPTCHA": "Captcha de Banxico",
+    "OMITIDO_CAPTCHA": "No consultado por captcha",
     "ERROR": "Error",
 }
+
+def estado_legible(estado: str) -> str:
+    """Cómo se le muestra un estado a quien usa la app.
+
+    Los estados que vienen del portal (DEVUELTO, CANCELADO...) no están en el
+    diccionario, así que se acomodan a mano en vez de salir gritando.
+    """
+    estado = (estado or "").strip()
+    if not estado:
+        return ""
+    return ESTADO_LEGIBLE.get(estado, estado.replace("_", " ").capitalize())
+
 
 # Lo que se pone en la columna «nombre» del cruce cuando la tarjeta no aparece
 # en la base. Es una constante y no un texto suelto porque, además de leerse,
@@ -2074,26 +2235,53 @@ def bloque_cep(records, valid_lines: int, prefijo: str):
         st.caption(
             "Consulta cada pago en el portal del CEP y te dice lo que reporta SPEI. "
             "El portal atiende de 09:30 a 23:00 hrs y pide captcha después de unas pocas "
-            "consultas seguidas; si eso pasa, marca la casilla y captúralo tú en la ventana."
+            "consultas seguidas; los pagos que caigan en el captcha se marcan y la "
+            "consulta sigue con los demás."
         )
-        col_v1, col_v2 = st.columns([1, 2])
-        with col_v1:
-            verificar = st.button(
-                "Verificar en Banxico", type="primary", disabled=valid_lines == 0,
-                key=f"cep_verificar_{prefijo}", icon=sio_tema.ICONO["verificar"],
-            )
-        with col_v2:
-            chrome_visible = st.checkbox(
-                "Abrir Chrome a la vista (necesario si sale el captcha)",
-                key=f"cep_visible_{prefijo}",
-            )
+        verificar = st.button(
+            "Verificar en Banxico", type="primary", disabled=valid_lines == 0,
+            key=f"cep_verificar_{prefijo}", icon=sio_tema.ICONO["verificar"],
+        )
 
         if verificar:
+            # La barra arranca en cero y sólo se mueve cuando `cep_banxico.py`
+            # avisa que cerró un pago: nada de progreso inventado por tiempo.
+            barra = st.progress(0.0)
+            aviso = st.empty()
+            aviso.caption(f"Consultando pago 0 de {valid_lines}...")
+
+            def avanzar(procesados, total, estado):
+                total = total or valid_lines or 1
+                barra.progress(min(procesados / total, 1.0))
+                aviso.caption(
+                    f"Consultando pago {procesados} de {total} — {estado_legible(estado)}"
+                )
+
             with st.spinner(f"Consultando {valid_lines} pago(s) en el portal del CEP..."):
                 try:
-                    st.session_state[llave_resultados] = consultar_cep(records, chrome_visible)
+                    resultados = consultar_cep(records, al_avanzar=avanzar)
+                    st.session_state[llave_resultados] = resultados
+
+                    if len(resultados) >= valid_lines:
+                        # Todos tienen estado final, aunque varios se hayan
+                        # omitido por captcha: el lote está cerrado.
+                        barra.progress(1.0)
+                        aviso.caption(
+                            f"Consulta finalizada: {len(resultados)} de {valid_lines} "
+                            "pagos procesados."
+                        )
+                    else:
+                        # Se cortó a medias. La barra se queda donde llegó: no
+                        # tiene por qué decir que terminó cuando no terminó.
+                        aviso.caption(
+                            f"Consulta interrumpida: se procesaron {len(resultados)} "
+                            f"de {valid_lines} pagos."
+                        )
                 except Exception as exc:  # noqa: BLE001
                     st.session_state[llave_resultados] = []
+                    # No se rescató nada: la barra sobra y estorba.
+                    barra.empty()
+                    aviso.empty()
                     detalle = traceback.format_exc()
                     st.error(f"Falló la consulta: {type(exc).__name__}: {exc}")
                     with st.expander("Detalle técnico del error"):
@@ -2112,9 +2300,7 @@ def bloque_cep(records, valid_lines: int, prefijo: str):
         for resultado in resultados_cep:
             # Lo que dice el portal manda; el diccionario sólo cubre los casos
             # que resuelve la app sin llegar a él.
-            estado = resultado.estado_portal or ESTADO_LEGIBLE.get(
-                resultado.estado, resultado.estado
-            )
+            estado = resultado.estado_portal or estado_legible(resultado.estado)
             filas.append({
                 "Archivo": resultado.etiqueta,
                 "Estado": estado,
@@ -2129,13 +2315,37 @@ def bloque_cep(records, valid_lines: int, prefijo: str):
         liquidados = sum(1 for r in resultados_cep if r.estado == "LIQUIDADO")
         st.metric("Pagos liquidados", f"{liquidados} de {len(resultados_cep)}")
 
-        if any(r.estado == "CAPTCHA" for r in resultados_cep):
-            st.info(
-                "Banxico pidió el código de seguridad y la consulta se detuvo ahí. "
-                "Marca «Abrir Chrome a la vista», vuelve a darle a Verificar y captúralo "
-                "en la ventana (tienes 60 segundos). Para tandas grandes conviene más la "
-                "consulta por lotes: https://www.banxico.org.mx/cep-scl/"
+        # Menos resultados que pagos mandados = la consulta se cortó a medias
+        # (por tiempo o porque el proceso se cayó). Lo de arriba es lo que sí se
+        # alcanzó a rescatar, y vale.
+        faltantes = valid_lines - len(resultados_cep)
+        if faltantes > 0:
+            st.warning(
+                f"Quedaron {faltantes} pago(s) sin consultar de {valid_lines}: la "
+                "consulta no alcanzó a terminar. Lo que aparece arriba ya está "
+                "verificado; vuelve a darle a Verificar para intentar el resto."
             )
+
+        con_captcha = sum(1 for r in resultados_cep if r.estado == "CAPTCHA")
+        omitidos = sum(1 for r in resultados_cep if r.estado == "OMITIDO_CAPTCHA")
+        if con_captcha or omitidos:
+            partes = []
+            if con_captcha:
+                partes.append(
+                    f"Banxico solicitó CAPTCHA en {con_captcha} pago(s): esa consulta se "
+                    "omitió y el proceso continuó."
+                )
+            if omitidos:
+                partes.append(
+                    f"Otros {omitidos} pago(s) ya no se consultaron, porque el captcha "
+                    "siguió apareciendo en varias consultas seguidas."
+                )
+            partes.append(
+                "Los demás resultados de arriba son válidos. Vuelve a darle a Verificar "
+                "más tarde para los que faltan, o usa la consulta por lotes, que es lo "
+                "que conviene en tandas grandes: https://www.banxico.org.mx/cep-scl/"
+            )
+            st.info(" ".join(partes))
 
         for resultado in resultados_cep:
             if resultado.mensaje_portal:
