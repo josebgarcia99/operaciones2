@@ -20,6 +20,7 @@ import zipfile
 from datetime import date
 
 import pandas as pd
+import sio_tema
 import streamlit as st
 
 try:
@@ -1775,39 +1776,39 @@ def validar_excel_contra_pdf(datos_excel: dict, record: dict, completo: dict) ->
     monto_xls = datos_excel.get("total")
     if monto_pdf is None or monto_xls is None:
         duro += 1
-        detalles.append("❌ monto: falta en alguno de los dos")
+        detalles.append(f"{sio_tema.ICONO['error']} monto: falta en alguno de los dos")
     elif round(monto_pdf, 2) == round(monto_xls, 2):
-        detalles.append(f"✅ monto: {round(monto_pdf, 2):,.2f}")
+        detalles.append(f"{sio_tema.ICONO['ok']} monto: {round(monto_pdf, 2):,.2f}")
     else:
         duro += 1
-        detalles.append(f"❌ monto: Excel {monto_xls:,.2f} vs comprobante {monto_pdf:,.2f}")
+        detalles.append(f"{sio_tema.ICONO['error']} monto: Excel {monto_xls:,.2f} vs comprobante {monto_pdf:,.2f}")
 
     estado, nota = comparar_nombres(datos_excel.get("cliente", ""), record.get("titular_ordenante", ""))
     if estado == "ok":
-        detalles.append("✅ pagador: " + (nota or "coincide"))
+        detalles.append(f"{sio_tema.ICONO['ok']} pagador: " + (nota or "coincide"))
     elif estado == "parecido":
         blando += 1
-        detalles.append(f"⚠️ pagador: {nota}")
+        detalles.append(f"{sio_tema.ICONO['aviso']} pagador: {nota}")
     else:
         duro += 1
-        detalles.append(f"❌ pagador: Excel «{datos_excel.get('cliente','')}» vs "
+        detalles.append(f"{sio_tema.ICONO['error']} pagador: Excel «{datos_excel.get('cliente','')}» vs "
                         f"comprobante «{record.get('titular_ordenante','')}» ({nota})")
 
     estado, nota = comparar_nombres(datos_excel.get("proveedor", ""), completo.get("_titular_beneficiario", ""))
     if estado == "ok":
-        detalles.append("✅ proveedor: " + (nota or "coincide"))
+        detalles.append(f"{sio_tema.ICONO['ok']} proveedor: " + (nota or "coincide"))
     else:
         blando += 1
-        detalles.append(f"⚠️ proveedor: Excel «{datos_excel.get('proveedor','')}» vs "
+        detalles.append(f"{sio_tema.ICONO['aviso']} proveedor: Excel «{datos_excel.get('proveedor','')}» vs "
                         f"comprobante «{completo.get('_titular_beneficiario','')}»")
 
     cuenta_xls = re.sub(r"\D", "", datos_excel.get("cuenta_bancaria", "") or "")
     cuenta_pdf = re.sub(r"\D", "", record.get("cuenta_beneficiaria", "") or "")
     if cuenta_xls and cuenta_pdf and cuenta_xls == cuenta_pdf:
-        detalles.append("✅ cuenta de depósito coincide")
+        detalles.append(f"{sio_tema.ICONO['ok']} cuenta de depósito coincide")
     else:
         blando += 1
-        detalles.append(f"⚠️ cuenta: Excel {cuenta_xls or '(vacía)'} vs pago {cuenta_pdf or '(vacía)'}")
+        detalles.append(f"{sio_tema.ICONO['aviso']} cuenta: Excel {cuenta_xls or '(vacía)'} vs pago {cuenta_pdf or '(vacía)'}")
 
     if duro:
         estado_final = "NO CUADRA"
@@ -1878,12 +1879,23 @@ def _ancho_tabla() -> dict:
 
 ANCHO_TABLA = _ancho_tabla()
 
-ICONO_ESTADO = {
-    "LIQUIDADO": "✅",
-    "NO_ENCONTRADO": "❌",
-    "CAPTCHA": "🔒",
-    "ERROR": "⚠️",
+# Cómo se lee cada estado del portal dentro de la tabla de resultados.
+#
+# Va en texto y no en icono a propósito: las celdas de `st.dataframe` se pintan
+# en plano, así que una directiva de icono se vería tal cual está escrita. Es
+# además lo que hacen las tablas de SIO, que marcan el estado con una etiqueta
+# de texto y no con un símbolo.
+ESTADO_LEGIBLE = {
+    "LIQUIDADO": "Liquidado",
+    "NO_ENCONTRADO": "No encontrado",
+    "CAPTCHA": "Falta el captcha",
+    "ERROR": "Error",
 }
+
+# Lo que se pone en la columna «nombre» del cruce cuando la tarjeta no aparece
+# en la base. Es una constante y no un texto suelto porque, además de leerse,
+# sirve para reconocer esos renglones al armar la dispersión.
+SIN_FICHA = "(no está en la base)"
 
 
 def render_bank_reference() -> str:
@@ -2067,8 +2079,8 @@ def bloque_cep(records, valid_lines: int, prefijo: str):
         col_v1, col_v2 = st.columns([1, 2])
         with col_v1:
             verificar = st.button(
-                "🔎 Verificar en Banxico", type="primary", disabled=valid_lines == 0,
-                key=f"cep_verificar_{prefijo}",
+                "Verificar en Banxico", type="primary", disabled=valid_lines == 0,
+                key=f"cep_verificar_{prefijo}", icon=sio_tema.ICONO["verificar"],
             )
         with col_v2:
             chrome_visible = st.checkbox(
@@ -2098,10 +2110,14 @@ def bloque_cep(records, valid_lines: int, prefijo: str):
     if resultados_cep:
         filas = []
         for resultado in resultados_cep:
-            icono = ICONO_ESTADO.get(resultado.estado, "•")
+            # Lo que dice el portal manda; el diccionario sólo cubre los casos
+            # que resuelve la app sin llegar a él.
+            estado = resultado.estado_portal or ESTADO_LEGIBLE.get(
+                resultado.estado, resultado.estado
+            )
             filas.append({
                 "Archivo": resultado.etiqueta,
-                "Estado": f"{icono} {resultado.estado_portal or resultado.estado}",
+                "Estado": estado,
                 "Clave de rastreo": resultado.clave_rastreo,
                 "Recibido en SPEI": resultado.recepcion,
                 "Procesado": resultado.procesamiento,
@@ -2353,7 +2369,7 @@ def seccion_cruce(acumulados):
                 and round(importe_original, 2) == importe
             )
             filas_cruce.append({
-                "nombre": ficha["nombre"] if ficha else "⚠️ no está en la base",
+                "nombre": ficha["nombre"] if ficha else SIN_FICHA,
                 "cuenta": renglon["tarjeta"],
                 "importe": importe,
                 "retencion": renglon.get("retencion") or 0.0,
@@ -2400,11 +2416,12 @@ def seccion_cruce(acumulados):
             )
 
         st.download_button(
-            "⬇️ Descargar este cruce en CSV",
+            "Descargar este cruce en CSV",
             data=cruce[COLS_CRUCE].to_csv(index=False).encode("utf_8_sig"),
             file_name=f"cruce_{os.path.splitext(nombre_excel)[0]}.csv",
             mime="text/csv",
             key=f"csv_{nombre_excel}",
+            icon=sio_tema.ICONO["descargar"],
         )
 
     return cruces
@@ -2449,11 +2466,16 @@ def seccion_excel(records, debug):
         emparejados, sueltos = emparejar_excels(excels, records, debug)
         for emparejado in emparejados:
             veredicto = emparejado["veredicto"]
-            icono = {"CUADRA": "✅", "CON OBSERVACIONES": "⚠️", "NO CUADRA": "❌"}[veredicto["estado"]]
+            icono = {
+                "CUADRA": sio_tema.ICONO["ok"],
+                "CON OBSERVACIONES": sio_tema.ICONO["aviso"],
+                "NO CUADRA": sio_tema.ICONO["error"],
+            }[veredicto["estado"]]
             with st.expander(
-                f"{icono} {emparejado['excel']}  ↔  {emparejado['record'].get('archivo','?')}  "
+                f"{emparejado['excel']}  ↔  {emparejado['record'].get('archivo','?')}  "
                 f"— {veredicto['estado']}",
                 expanded=veredicto["estado"] != "CUADRA",
+                icon=icono,
             ):
                 for linea in veredicto["detalles"]:
                     st.markdown(f"- {linea}")
@@ -2568,11 +2590,12 @@ def bloque_concentrado(excels, acumulados, cruces):
         return
 
     st.download_button(
-        f"⬇️ Descargar concentrado ({len(bloques)} cliente(s))",
+        f"Descargar concentrado ({len(bloques)} cliente(s))",
         data=contenido,
         file_name=f"acumulado_conv_{date.today():%d%m%Y}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="descarga_concentrado",
+        icon=sio_tema.ICONO["descargar"],
     )
     st.caption(
         "Un bloque por cliente: la dispersión del Excel a la izquierda y el cruce "
@@ -2601,7 +2624,7 @@ def filas_de_carga(tabla_dispersion, tabla_cruce):
     if tabla_cruce is not None and not tabla_cruce.empty:
         for renglon in tabla_cruce.to_dict("records"):
             nombre = str(renglon.get("nombre") or "")
-            if nombre and not nombre.startswith("⚠️"):
+            if nombre and nombre != SIN_FICHA:
                 nombres_base[str(renglon.get("cuenta"))] = nombre
 
     filas = []
@@ -2678,9 +2701,10 @@ def bloque_carga_masiva(excels, acumulados, cruces):
             )
         with col_b:
             st.download_button(
-                "⬇️ Descargar", data=item["contenido"], file_name=item["archivo"],
+                "Descargar", data=item["contenido"], file_name=item["archivo"],
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key=f"carga_{indice}",
+                icon=sio_tema.ICONO["descargar"],
             )
 
     if len(paquete) > 1:
@@ -2689,11 +2713,12 @@ def bloque_carga_masiva(excels, acumulados, cruces):
             for item in paquete:
                 zf.writestr(item["archivo"], item["contenido"])
         st.download_button(
-            f"⬇️ Descargar los {len(paquete)} formatos en un ZIP",
+            f"Descargar los {len(paquete)} formatos en un ZIP",
             data=memoria.getvalue(),
             file_name=f"formatos_carga_{date.today():%d%m%Y}.zip",
             mime="application/zip",
             key="carga_zip",
+            icon=sio_tema.ICONO["descargar"],
         )
 
 
@@ -2803,11 +2828,12 @@ def bloque_operaciones(excels):
         return
 
     st.download_button(
-        f"⬇️ Descargar CR3 CONV ({len(operaciones)} operación(es))",
+        f"Descargar CR3 CONV ({len(operaciones)} operación(es))",
         data=contenido,
         file_name=f"cr3_conv_{date.today():%d%m%Y}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="descarga_operaciones",
+        icon=sio_tema.ICONO["descargar"],
     )
 
 
@@ -2817,10 +2843,10 @@ def vista_completa():
     Vive en una función, y ya no suelta a nivel de módulo, para poder llamarla
     desde app_cep.py como una pestaña más sin que importar este archivo dispare
     la interfaz."""
-    st.title("Extractor de comprobantes de transferencia para CEP Banxico")
-    st.caption(
+    sio_tema.encabezado(
+        "Extractor de comprobantes de transferencia para CEP Banxico",
         "Sube uno o varios PDFs (con texto o escaneados) y genera el archivo TXT para "
-        "la consulta de CEP por lotes."
+        "la consulta de CEP por lotes.",
     )
 
     # El aviso de motores solo aparece si de verdad falta uno; ya no ocupa la barra
@@ -2891,7 +2917,7 @@ def vista_completa():
             )
             col_g, col_h = st.columns([1, 3])
             with col_g:
-                if st.button("💾 Guardar cuentas"):
+                if st.button("Guardar cuentas", icon=sio_tema.ICONO["guardar"]):
                     guardar_cuentas_conocidas(cuentas_editadas.fillna("").to_dict("records"))
                     st.success("Guardadas. Vuelve a subir los PDFs para aplicarlas.")
             with col_h:
@@ -2899,11 +2925,12 @@ def vista_completa():
 
         with tab_txt:
             st.download_button(
-                "⬇️ Descargar archivo .txt para Banxico",
+                "Descargar archivo .txt para Banxico",
                 data=txt_content,
                 file_name="transferencias_cep.txt",
                 mime="text/plain",
                 disabled=valid_lines == 0,
+                icon=sio_tema.ICONO["descargar"],
             )
             st.code(txt_content or "Aún no hay renglones válidos.", language="text")
 
@@ -2919,14 +2946,17 @@ def vista_completa():
 
         with tab_bancos:
             st.download_button(
-                "⬇️ Descargar instrucciones + catálogo",
+                "Descargar instrucciones + catálogo",
                 data=INSTRUCCIONES + render_bank_reference(),
                 file_name="instrucciones_banxico_cep.txt",
                 mime="text/plain",
+                icon=sio_tema.ICONO["descargar"],
             )
             st.code(render_bank_reference(), language="text")
 
 
 if __name__ == "__main__":
-    st.set_page_config(page_title="Extractor de CEP - Banxico", page_icon="💳", layout="wide")
+    sio_tema.config_pagina("Extractor de CEP")
+    sio_tema.aplicar()
     vista_completa()
+    sio_tema.pie()
