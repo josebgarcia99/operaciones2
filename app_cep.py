@@ -17,9 +17,11 @@ Banxico aparece en las dos vistas, pero está escrita una sola vez.
 """
 
 import cr3
+import sio_tema
 import streamlit as st
 
-st.set_page_config(page_title="Comprobantes SPEI - CEP Banxico", page_icon="💳", layout="wide")
+sio_tema.config_pagina("Comprobantes SPEI")
+sio_tema.aplicar()
 
 # En la vista rápida sobra el titular del ordenante, que es para cuadrar contra
 # los Excel de dispersión y no lo pide el portal del CEP.
@@ -28,11 +30,11 @@ COLUMNAS_BANXICO = [col for col in cr3.TABLE_COLS if col != "titular_ordenante"]
 
 def vista_banxico():
     """Sólo verificar: leer los comprobantes y preguntarle a Banxico por cada pago."""
-    st.title("Verificar pagos en Banxico")
-    st.caption(
+    sio_tema.encabezado(
+        "Verificar pagos en Banxico",
         "Sube los comprobantes y consulta el estado de cada pago en el portal del CEP. "
         "Para el proceso completo (Excel de dispersión, cruce con la base de tarjetas) "
-        "usa la otra pestaña."
+        "usa la otra pestaña.",
     )
 
     if not (cr3.RapidOCR and cr3.np) and not cr3.TESSERACT_READY:
@@ -74,20 +76,28 @@ def vista_banxico():
         "https://www.banxico.org.mx/cep-scl/"
     )
     st.download_button(
-        "⬇️ Descargar archivo .txt para Banxico",
+        "Descargar archivo .txt para Banxico",
         data=txt_content,
         file_name="transferencias_cep.txt",
         mime="text/plain",
         disabled=valid_lines == 0,
         key="txt_banxico",
+        icon=sio_tema.ICONO["descargar"],
     )
     st.code(txt_content or "Aún no hay renglones válidos.", language="text")
 
 
-tab_banxico, tab_completo = st.tabs(["🔎 Verificar en Banxico", "🧾 cr3"])
+tab_banxico, tab_completo = st.tabs(
+    [
+        f"{sio_tema.ICONO['verificar']} Verificar en Banxico",
+        f"{sio_tema.ICONO['recibo']} cr3",
+    ]
+)
 
 with tab_banxico:
     vista_banxico()
 
 with tab_completo:
     cr3.vista_completa()
+
+sio_tema.pie()
