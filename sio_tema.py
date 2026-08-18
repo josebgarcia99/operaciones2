@@ -197,8 +197,21 @@ header[data-testid="stHeader"] [data-testid="stToolbar"] button:hover {{
 
 [data-testid="stMainBlockContainer"] {{
     padding-top: calc(var(--sio-header-h) + 1.5rem);
-    padding-bottom: 3rem;
+    padding-bottom: 1.5rem;
     max-width: 1400px;
+
+    /* La columna ocupa la ventana entera aunque la página quede corta. Sin
+       esto el pie se queda pegado al último elemento, a media pantalla. */
+    display: flex;
+    flex-direction: column;
+    min-height: 100dvh;
+}}
+
+/* El bloque de contenido se lleva el alto sobrante; lo que venga después
+   —el pie— queda abajo. `1 0 auto` y no `1`: encogerlo haría que una página
+   larga se comprimiera en lugar de desplazarse. */
+[data-testid="stMainBlockContainer"] > [data-testid="stVerticalBlock"] {{
+    flex: 1 0 auto;
 }}
 
 .sio-heading {{
@@ -403,8 +416,15 @@ header[data-testid="stHeader"] [data-testid="stToolbar"] button:hover {{
    Pie de página (.sio-sidebar__footer)
    ========================================================================== */
 
+/* `margin-top: auto` se come el hueco que sobra y empuja el pie al fondo.
+   Cuando la página es larga no sobra nada, así que el `padding-top` es el que
+   garantiza la separación con el último elemento en ese caso. */
+[data-testid="stElementContainer"]:has(.sio-pie) {{
+    margin-top: auto;
+    padding-top: 2.5rem;
+}}
+
 .sio-pie {{
-    margin-top: 2.5rem;
     padding-top: 1rem;
     border-top: 1px solid var(--sio-line);
     font-size: 0.6875rem;
