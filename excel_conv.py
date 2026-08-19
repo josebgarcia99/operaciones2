@@ -75,14 +75,24 @@ def _leer_hojas(datos: bytes):
         for fila in ET.fromstring(z.read(ruta)).iter(NS + "row"):
             celdas = {}
             for c in fila.iter(NS + "c"):
-                v = c.find(NS + "v")
-                if v is None or v.text is None:
-                    continue
-                if c.get("t") == "s":
-                    indice = int(v.text)
-                    valor = compartidas[indice] if indice < len(compartidas) else ""
+                if c.get("t") == "inlineStr":
+                    # Texto escrito dentro de la propia celda, sin pasar por la
+                    # tabla de cadenas. Excel casi no lo usa, pero los
+                    # exportadores sí; sin esto sus columnas de texto se caen
+                    # enteras y la hoja parece vacía.
+                    bloque = c.find(NS + "is")
+                    if bloque is None:
+                        continue
+                    valor = "".join(t.text or "" for t in bloque.iter(NS + "t"))
                 else:
-                    valor = v.text
+                    v = c.find(NS + "v")
+                    if v is None or v.text is None:
+                        continue
+                    if c.get("t") == "s":
+                        indice = int(v.text)
+                        valor = compartidas[indice] if indice < len(compartidas) else ""
+                    else:
+                        valor = v.text
                 if str(valor).strip():
                     celdas[_columna(c.get("r"))] = str(valor).strip()
             filas.append(celdas)
@@ -100,8 +110,39 @@ def _valor_a_la_derecha(fila: dict, columna: str) -> str:
     return ""
 
 
+# Cada quien titula las columnas a su manera, así que aquí viven todas las
+# variantes vistas en los Excel de dispersión. Se comparan ya normalizadas
+# (mayúsculas, sin acentos ni espacios) y SIEMPRE por igualdad exacta: si se
+# comparara por "contiene", IMPORTE BRUTO e IMPORTE NETO A PAGAR se pisarían
+# entre sí, y son columnas distintas.
+ALIAS_NOMBRE = (
+    "NOMBRE", "NOMBRECOMPLETO", "NOMBRECOMPLETOTITULAR",
+    "NOMBRECOMPLETODETITULAR", "NOMBREDELTITULAR", "NOMBREDELBENEFICIARIO",
+    "TITULAR", "BENEFICIARIO",
+)
+ALIAS_TARJETA = (
+    "TARJETA", "NOTARJETA", "NUMTARJETA", "NUMEROTARJETA", "TARJETAMONEDERO",
+    # Algunos archivos titulan la misma columna de monedero como cuenta.
+    "CUENTABANCARIA",
+)
+ALIAS_IMPORTE = ("IMPORTE", "IMPORTEBRUTO", "BRUTO")
+ALIAS_RETENCION = (
+    "RETENCION", "RETENCIONES", "DESCUENTO", "DESCUENTOS", "DEMERITO", "DEMERITOS",
+)
 # Última columna del detalle: cada archivo la nombra distinto.
-ALIAS_PAGO_FINAL = ("PAGOFINAL", "DEPOSITOFINAL", "TOTAL", "PAGO", "DEPOSITO")
+ALIAS_PAGO_FINAL = (
+    "PAGOFINAL", "DEPOSITOFINAL", "IMPORTENETOAPAGAR", "IMPORTENETO",
+    "NETOAPAGAR", "NETO", "TOTAL", "PAGO", "DEPOSITO",
+)
+
+# Se recorre en este orden y el primer alias que empate se queda la columna.
+CAMPOS_DETALLE = (
+    ("tarjeta", ALIAS_TARJETA),
+    ("nombre", ALIAS_NOMBRE),
+    ("importe", ALIAS_IMPORTE),
+    ("retencion", ALIAS_RETENCION),
+    ("pago_final", ALIAS_PAGO_FINAL),
+)
 ETIQUETAS_ENCABEZADO = {
     "CLIENTE": "cliente",
     "PROVEEDOR": "proveedor",
@@ -110,11 +151,38 @@ ETIQUETAS_ENCABEZADO = {
 }
 
 
+# Renglones de cierre: llevan números pero no son gente. Si alguno cae en la
+# columna del nombre, no es un pago en resguardo, es el pie de la tabla.
+ETIQUETAS_CIERRE = frozenset((
+    "TOTAL", "TOTALES", "SUBTOTAL", "TOTALDISPERSION", "TOTALFACTURA",
+    "MONEDERO", "IVA", "SUMA", "GRANTOTAL",
+))
+
+
+def _persona_sin_tarjeta(registro: dict) -> bool:
+    """¿Es una persona a la que le toca dinero pero no tiene tarjeta?
+
+    Hay que separarla de todo lo demás que vive sin tarjeta en estas hojas:
+    los renglones de cierre, los títulos de bloque y los encabezados repetidos
+    cuando el archivo pega varias tablas una tras otra. El filtro es que traiga
+    nombre de persona y algún importe: sin dinero de por medio no hay nada que
+    resguardar.
+    """
+    titulo = normalizar_nombre(registro["nombre"])
+    if not titulo or titulo in ETIQUETAS_CIERRE or titulo in ALIAS_NOMBRE:
+        return False
+    return any((registro.get(campo) or 0) for campo in ("importe", "retencion", "pago_final"))
+
+
 def leer_excel_convenia(datos: bytes) -> dict:
     """Encabezado + detalle del primer hoja que traiga la tabla de dispersión."""
     resultado = {
         "cliente": "", "proveedor": "", "cuenta_bancaria": "", "periodo": "",
         "total": None, "hoja": "", "detalle": [], "total_dispersion": None,
+        # Gente con importe pero sin tarjeta donde depositarlo: no se puede
+        # dispersar, así que se queda en resguardo. Va aparte de `detalle` para
+        # no alterar lo que ya consume esa lista (cruce, carga masiva...).
+        "sin_tarjeta": [],
         "avisos": [],
     }
 
@@ -122,7 +190,9 @@ def leer_excel_convenia(datos: bytes) -> dict:
         fila_encabezado = None
         for indice, fila in enumerate(filas):
             claves = {normalizar_nombre(v) for v in fila.values()}
-            if "TARJETA" in claves and "NOMBRE" in claves:
+            # Con que traiga cómo identificar a la persona y su tarjeta basta
+            # para reconocer la tabla; el resto de columnas ya se acomodan.
+            if claves & set(ALIAS_TARJETA) and claves & set(ALIAS_NOMBRE):
                 fila_encabezado = indice
                 break
         if fila_encabezado is None:
@@ -147,16 +217,14 @@ def leer_excel_convenia(datos: bytes) -> dict:
         mapa = {}
         for columna, valor in filas[fila_encabezado].items():
             titulo = normalizar_nombre(valor)
-            if titulo == "TARJETA":
-                mapa[columna] = "tarjeta"
-            elif titulo == "NOMBRE":
-                mapa[columna] = "nombre"
-            elif titulo == "IMPORTE":
-                mapa[columna] = "importe"
-            elif titulo == "RETENCION":
-                mapa[columna] = "retencion"
-            elif titulo in ALIAS_PAGO_FINAL and "pago_final" not in mapa.values():
-                mapa[columna] = "pago_final"
+            for campo, alias in CAMPOS_DETALLE:
+                # El primero que llega gana. Importa cuando la hoja trae dos
+                # tablas pegadas —el acumulado, por ejemplo, lleva el detalle y
+                # luego el cruce—: nos quedamos con la de la izquierda en vez de
+                # terminar con las columnas de una y de otra revueltas.
+                if titulo in alias and campo not in mapa.values():
+                    mapa[columna] = campo
+                    break
 
         columna_tarjeta = next((c for c, campo in mapa.items() if campo == "tarjeta"), None)
         columna_nombre = next((c for c, campo in mapa.items() if campo == "nombre"), None)
@@ -172,7 +240,7 @@ def leer_excel_convenia(datos: bytes) -> dict:
 
             tarjeta = (fila.get(columna_tarjeta, "") if columna_tarjeta else "").lstrip("'").strip()
             nombre = (fila.get(columna_nombre, "") if columna_nombre else "").strip()
-            if not re.fullmatch(r"\d{6,20}", tarjeta) or not nombre:
+            if not nombre:
                 continue
 
             registro = {"tarjeta": tarjeta, "nombre": nombre,
@@ -180,9 +248,16 @@ def leer_excel_convenia(datos: bytes) -> dict:
             for columna, campo in mapa.items():
                 if campo in ("importe", "retencion", "pago_final"):
                     registro[campo] = a_numero(fila.get(columna))
-            resultado["detalle"].append(registro)
 
-        if resultado["detalle"]:
+            if re.fullmatch(r"\d{6,20}", tarjeta):
+                resultado["detalle"].append(registro)
+            elif _persona_sin_tarjeta(registro):
+                # Lo que traiga la celda de tarjeta no sirve como cuenta; se
+                # limpia para que nadie la confunda con uno de verdad.
+                registro["tarjeta"] = ""
+                resultado["sin_tarjeta"].append(registro)
+
+        if resultado["detalle"] or resultado["sin_tarjeta"]:
             break
 
     if resultado["total"] is None and resultado["total_dispersion"] is not None:
@@ -318,6 +393,10 @@ def leer_base_tarjetas(datos: bytes, nombre_archivo: str = "") -> dict:
 
 AZUL_IZQUIERDA = "1F6FC4"
 AZUL_DERECHA = "1F3864"
+# Los resguardos no son dinero que se disperse, así que no van en azul: se
+# distinguen a simple vista de las dos tablas de pago.
+AMBAR_RESGUARDO = "B26A00"    # lo retenido, que se le queda al cliente
+GRIS_RESGUARDO = "5B6781"     # lo que no se pudo depositar y queda en Convenia
 GRIS_TOTAL = "D9D9D9"
 FORMATO_MONEDA = "#,##0.00"
 # Formato contable: el cero se ve como "-", igual que en el archivo que se
@@ -417,8 +496,23 @@ def escribir_acumulado_xlsx(bloques) -> bytes:
             fin_derecha = _escribe_tabla(hoja, fila, COL_DERECHA,
                                          bloque["cruce"], AZUL_DERECHA)
 
+        # Los resguardos van debajo de la dispersión, cada uno con su título, y
+        # sólo si tienen renglones: si el periodo no trajo retenciones ni gente
+        # sin tarjeta, el concentrado se ve igual que siempre.
+        fila = max(fin_izquierda, fin_derecha)
+        for clave, color in (("resguardo_cliente", AMBAR_RESGUARDO),
+                             ("resguardo_convenia", GRIS_RESGUARDO)):
+            sub_bloque = bloque.get(clave)
+            if not (sub_bloque and sub_bloque.get("filas")):
+                continue
+            fila += 1
+            celda = hoja.cell(row=fila, column=COL_IZQUIERDA,
+                              value=sub_bloque.get("titulo", "RESGUARDO"))
+            celda.font = Font(bold=True)
+            fila = _escribe_tabla(hoja, fila + 1, COL_IZQUIERDA, sub_bloque, color)
+
         # Dos renglones en blanco entre clientes, como en el archivo original.
-        fila = max(fin_izquierda, fin_derecha) + 2
+        fila += 2
 
     memoria = io.BytesIO()
     libro.save(memoria)

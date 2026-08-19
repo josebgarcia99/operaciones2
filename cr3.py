@@ -2478,6 +2478,50 @@ def con_totales(tabla, columnas_suma, etiqueta="TOTAL DISPERSIÓN", columna_etiq
     return pd.concat([tabla, pd.DataFrame([total])], ignore_index=True)
 
 
+# Dos resguardos, dos cosas distintas:
+#   cliente  -> lo que se le retuvo a la gente; ese dinero se le queda al
+#               cliente, no se deposita.
+#   convenia -> lo que sí se le debe a alguien pero no tiene tarjeta a dónde
+#               mandarlo, así que se queda en Convenia hasta que la haya.
+COLS_RESGUARDO_CLIENTE = ["nombre", "tarjeta", "importe", "retencion"]
+COLS_RESGUARDO_CONVENIA = ["nombre", "importe", "retencion", "en_resguardo"]
+
+
+def tablas_resguardo(datos):
+    """Los dos resguardos de un Excel. Devuelve (cliente, convenia)."""
+    # La retención cuenta venga de donde venga: también de un renglón sin
+    # tarjeta, y también cuando se llevó el pago completo y el neto quedó en
+    # cero. Ese último caso es justo el que hoy se perdía, porque el acumulado
+    # descarta los renglones que no dejan nada que depositar.
+    cliente = [
+        {
+            "nombre": renglon["nombre"],
+            "tarjeta": renglon.get("tarjeta", ""),
+            "importe": renglon.get("importe"),
+            "retencion": renglon.get("retencion"),
+        }
+        for renglon in list(datos.get("detalle", [])) + list(datos.get("sin_tarjeta", []))
+        if (renglon.get("retencion") or 0)
+    ]
+
+    convenia = []
+    for renglon in datos.get("sin_tarjeta", []):
+        neto = renglon.get("pago_final")
+        if neto is None:
+            # Sin columna de neto, lo que queda en resguardo es el bruto menos
+            # lo retenido, que es la misma cuenta que hace el resto de la app.
+            neto = (renglon.get("importe") or 0) - (renglon.get("retencion") or 0)
+        convenia.append({
+            "nombre": renglon["nombre"],
+            "importe": renglon.get("importe"),
+            "retencion": renglon.get("retencion") or 0.0,
+            "en_resguardo": round(neto, 2),
+        })
+
+    return (pd.DataFrame(cliente, columns=COLS_RESGUARDO_CLIENTE),
+            pd.DataFrame(convenia, columns=COLS_RESGUARDO_CONVENIA))
+
+
 def _filas_para_excel(tabla, columnas):
     """La tabla como lista de listas, con NaN convertido a vacío."""
     filas = []
@@ -2500,7 +2544,13 @@ def armar_bloques(excels, acumulados, cruces):
     bloques = []
     for nombre_excel, datos in excels:
         dispersion = acumulados.get(nombre_excel)
-        if dispersion is None or dispersion.empty:
+        if dispersion is None:
+            dispersion = pd.DataFrame(columns=COLS_DISPERSION)
+        resguardo_cliente, resguardo_convenia = tablas_resguardo(datos)
+        # Se exporta si hay algo que exportar. Antes bastaba con que la
+        # dispersión viniera vacía para saltarse el cliente entero; ahora un
+        # periodo donde todo se retuvo sigue apareciendo, con su resguardo.
+        if dispersion.empty and resguardo_cliente.empty and resguardo_convenia.empty:
             continue
         cruce = cruces.get(nombre_excel)
         bloques.append({
@@ -2524,8 +2574,76 @@ def armar_bloques(excels, acumulados, cruces):
                 "columna_etiqueta": 1,
                 "etiqueta_total": "TOTAL",
             },
+            "resguardo_cliente": {
+                "titulo": "RESGUARDO CLIENTE",
+                "encabezados": ["NOMBRE", "TARJETA", "IMPORTE", "RETENIDO"],
+                "filas": _filas_para_excel(resguardo_cliente, COLS_RESGUARDO_CLIENTE),
+                "numericas": [2, 3],
+                "total_en": [3],
+                "columna_etiqueta": 0,
+                "etiqueta_total": "TOTAL RESGUARDO CLIENTE",
+            },
+            "resguardo_convenia": {
+                "titulo": "RESGUARDO CONVENIA",
+                "encabezados": ["NOMBRE", "IMPORTE", "RETENCIÓN", "EN RESGUARDO"],
+                "filas": _filas_para_excel(resguardo_convenia, COLS_RESGUARDO_CONVENIA),
+                "numericas": [1, 2, 3],
+                "total_en": [3],
+                "columnas_guion": [2],
+                "columna_etiqueta": 0,
+                "etiqueta_total": "TOTAL RESGUARDO CONVENIA",
+            },
         })
     return bloques
+
+
+def bloque_resguardos(datos):
+    """Pinta los resguardos de un Excel, si es que tiene.
+
+    Se dibujan aparte de la dispersión a propósito: ese dinero NO se deposita,
+    y mezclarlo con la tabla de pagos es justo lo que confunde a la hora de
+    cuadrar contra el comprobante.
+    """
+    resguardo_cliente, resguardo_convenia = tablas_resguardo(datos)
+
+    if not resguardo_cliente.empty:
+        retenido = resguardo_cliente["retencion"].sum()
+        st.markdown("**RESGUARDO CLIENTE**")
+        st.caption(
+            f"{len(resguardo_cliente)} renglón(es) con retención o descuento. "
+            f"Esos {retenido:,.2f} no se dispersan: se le quedan al cliente."
+        )
+        st.dataframe(
+            con_totales(resguardo_cliente, ("importe", "retencion"),
+                        etiqueta="TOTAL RESGUARDO CLIENTE"),
+            hide_index=True, **ANCHO_TABLA,
+            column_config={
+                "nombre": st.column_config.TextColumn("Nombre"),
+                "tarjeta": st.column_config.TextColumn("Tarjeta"),
+                "importe": st.column_config.NumberColumn("Importe", format="%.2f"),
+                "retencion": st.column_config.NumberColumn("Retenido", format="%.2f"),
+            },
+        )
+
+    if not resguardo_convenia.empty:
+        en_resguardo = resguardo_convenia["en_resguardo"].sum()
+        st.markdown("**RESGUARDO CONVENIA**")
+        st.caption(
+            f"{len(resguardo_convenia)} renglón(es) sin número de tarjeta. "
+            f"Esos {en_resguardo:,.2f} no se pueden depositar y quedan en resguardo "
+            "hasta que haya cuenta a dónde mandarlos."
+        )
+        st.dataframe(
+            con_totales(resguardo_convenia, ("importe", "retencion", "en_resguardo"),
+                        etiqueta="TOTAL RESGUARDO CONVENIA"),
+            hide_index=True, **ANCHO_TABLA,
+            column_config={
+                "nombre": st.column_config.TextColumn("Nombre"),
+                "importe": st.column_config.NumberColumn("Importe", format="%.2f"),
+                "retencion": st.column_config.NumberColumn("Retención", format="%.2f"),
+                "en_resguardo": st.column_config.NumberColumn("En resguardo", format="%.2f"),
+            },
+        )
 
 
 def seccion_cruce(acumulados):
@@ -2766,6 +2884,8 @@ def seccion_excel(records, debug):
                 st.metric("Total dispersión", f"{esperado:,.2f}",
                           delta=f"faltan {esperado - suma - retenido:,.2f}",
                           delta_color="inverse")
+
+        bloque_resguardos(datos)
 
     acumulado = (pd.concat(acumulados.values(), ignore_index=True)
                  if acumulados else pd.DataFrame(columns=COLS_DISPERSION))
