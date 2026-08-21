@@ -1,4 +1,4 @@
-"""App de comprobantes SPEI con dos vistas.
+"""App de comprobantes SPEI y validaciones operativas.
 
     streamlit run app_cep.py
 
@@ -10,13 +10,17 @@ Pestaña 2 — cr3: la app de siempre, sin recortes (`cr3.py`). El Excel de
 dispersión de esa pestaña funciona con o sin comprobantes: el PDF sólo sirve
 para verificar que los totales cuadren.
 
-Las dos pestañas son independientes: cada una tiene su propio cargador de
+Las pestañas son independientes: cada una tiene su propio cargador de
 archivos, su propia tabla y sus propios resultados. Lo único que comparten es
 el código, que vive en `cr3.py` y se llama desde aquí: la verificación en
 Banxico aparece en las dos vistas, pero está escrita una sola vez.
+
+Pestaña 3 — Litografía: carga un Excel y compara la Suma de la hoja Resumen
+contra la Suma localizada en cada hoja de detalle (`litografia.py`).
 """
 
 import cr3
+import litografia
 import sio_tema
 import streamlit as st
 
@@ -87,10 +91,11 @@ def vista_banxico():
     st.code(txt_content or "Aún no hay renglones válidos.", language="text")
 
 
-tab_banxico, tab_completo = st.tabs(
+tab_banxico, tab_completo, tab_litografia = st.tabs(
     [
         f"{sio_tema.ICONO['verificar']} Verificar en Banxico",
         f"{sio_tema.ICONO['recibo']} cr3",
+        "Litografía",
     ]
 )
 
@@ -99,5 +104,8 @@ with tab_banxico:
 
 with tab_completo:
     cr3.vista_completa()
+
+with tab_litografia:
+    litografia.vista_litografia()
 
 sio_tema.pie()
