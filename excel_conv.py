@@ -118,7 +118,7 @@ def _valor_a_la_derecha(fila: dict, columna: str) -> str:
 ALIAS_NOMBRE = (
     "NOMBRE", "NOMBRECOMPLETO", "NOMBRECOMPLETOTITULAR",
     "NOMBRECOMPLETODETITULAR", "NOMBREDELTITULAR", "NOMBREDELBENEFICIARIO",
-    "TITULAR", "BENEFICIARIO",
+    "TITULAR", "BENEFICIARIO", "NOMRE",
 )
 ALIAS_TARJETA = (
     "TARJETA", "NOTARJETA", "NUMTARJETA", "NUMEROTARJETA", "TARJETAMONEDERO",
@@ -143,6 +143,25 @@ CAMPOS_DETALLE = (
     ("retencion", ALIAS_RETENCION),
     ("pago_final", ALIAS_PAGO_FINAL),
 )
+
+
+def _campo_de_encabezado(valor) -> str | None:
+    """Reconoce una columna aun cuando el título venga compuesto o con erratas.
+
+    Los alias exactos siguen teniendo prioridad para no confundir, por ejemplo,
+    IMPORTE BRUTO con IMPORTE NETO. La tolerancia se limita al nombre de la
+    persona, donde se han recibido formatos como "NOMRE (S), APELIDO...".
+    """
+    titulo = normalizar_nombre(valor)
+    for campo, alias in CAMPOS_DETALLE:
+        if titulo in alias:
+            return campo
+
+    empieza_como_nombre = titulo.startswith("NOMBRE") or titulo.startswith("NOMRE")
+    menciona_apellidos = "APELLIDO" in titulo or "APELIDO" in titulo
+    if empieza_como_nombre and menciona_apellidos:
+        return "nombre"
+    return None
 ETIQUETAS_ENCABEZADO = {
     "CLIENTE": "cliente",
     "PROVEEDOR": "proveedor",
@@ -155,8 +174,27 @@ ETIQUETAS_ENCABEZADO = {
 # columna del nombre, no es un pago en resguardo, es el pie de la tabla.
 ETIQUETAS_CIERRE = frozenset((
     "TOTAL", "TOTALES", "SUBTOTAL", "TOTALDISPERSION", "TOTALFACTURA",
-    "MONEDERO", "IVA", "SUMA", "GRANTOTAL",
+    "TOTALOPERACION", "TOTALDEOPERACION", "MONEDERO", "IVA", "SUMA", "GRANTOTAL",
 ))
+
+ETIQUETAS_TOTAL_DISPERSION = frozenset((
+    "TOTALDISPERSION", "TOTALDELDISPERSION", "TOTALOPERACION", "TOTALDEOPERACION",
+))
+ETIQUETAS_TOTAL_OPERACION = frozenset(("TOTALOPERACION", "TOTALDEOPERACION"))
+
+
+def _total_calculado(registros: list[dict]) -> float | None:
+    """Suma netos cuando el archivo no guarda el resultado de su fórmula total."""
+    valores = []
+    for registro in registros:
+        pago_final = registro.get("pago_final")
+        if pago_final is not None:
+            valores.append(pago_final)
+            continue
+        importe = registro.get("importe")
+        if importe is not None:
+            valores.append(importe - (registro.get("retencion") or 0.0))
+    return round(sum(valores), 2) if valores else None
 
 
 def _persona_sin_tarjeta(registro: dict) -> bool:
@@ -189,10 +227,10 @@ def leer_excel_convenia(datos: bytes) -> dict:
     for nombre_hoja, filas in _leer_hojas(datos):
         fila_encabezado = None
         for indice, fila in enumerate(filas):
-            claves = {normalizar_nombre(v) for v in fila.values()}
+            campos = {_campo_de_encabezado(v) for v in fila.values()}
             # Con que traiga cómo identificar a la persona y su tarjeta basta
             # para reconocer la tabla; el resto de columnas ya se acomodan.
-            if claves & set(ALIAS_TARJETA) and claves & set(ALIAS_NOMBRE):
+            if "tarjeta" in campos and "nombre" in campos:
                 fila_encabezado = indice
                 break
         if fila_encabezado is None:
@@ -213,29 +251,46 @@ def leer_excel_convenia(datos: bytes) -> dict:
                         if numeros:
                             resultado["total"] = round(max(numeros), 2)
 
+        # Algunos formatos no usan la etiqueta PERIODO y escriben directamente
+        # "Semana 34 del ..." como título sobre la tabla.
+        if not resultado["periodo"]:
+            for fila in filas[:fila_encabezado]:
+                periodo = next(
+                    (
+                        str(valor).strip()
+                        for valor in fila.values()
+                        if normalizar_nombre(valor).startswith("SEMANA")
+                    ),
+                    "",
+                )
+                if periodo:
+                    resultado["periodo"] = periodo
+                    break
+
         # Mapa columna -> campo, a partir del renglón de encabezados.
         mapa = {}
         for columna, valor in filas[fila_encabezado].items():
-            titulo = normalizar_nombre(valor)
-            for campo, alias in CAMPOS_DETALLE:
-                # El primero que llega gana. Importa cuando la hoja trae dos
-                # tablas pegadas —el acumulado, por ejemplo, lleva el detalle y
-                # luego el cruce—: nos quedamos con la de la izquierda en vez de
-                # terminar con las columnas de una y de otra revueltas.
-                if titulo in alias and campo not in mapa.values():
-                    mapa[columna] = campo
-                    break
+            campo = _campo_de_encabezado(valor)
+            # El primero que llega gana. Importa cuando la hoja trae dos tablas
+            # pegadas: nos quedamos con la de la izquierda.
+            if campo and campo not in mapa.values():
+                mapa[columna] = campo
 
         columna_tarjeta = next((c for c, campo in mapa.items() if campo == "tarjeta"), None)
         columna_nombre = next((c for c, campo in mapa.items() if campo == "nombre"), None)
+        tiene_pago_final = "pago_final" in mapa.values()
 
         for fila in filas[fila_encabezado + 1:]:
             etiquetas = {normalizar_nombre(v) for v in fila.values()}
-            if "TOTALDISPERSION" in etiquetas:
+            etiqueta_total = etiquetas & ETIQUETAS_TOTAL_DISPERSION
+            if etiqueta_total:
                 numeros = [a_numero(v) for v in fila.values()]
                 numeros = [n for n in numeros if n is not None]
                 if numeros:
-                    resultado["total_dispersion"] = round(max(numeros), 2)
+                    total_encontrado = round(max(numeros), 2)
+                    resultado["total_dispersion"] = total_encontrado
+                    if etiqueta_total & ETIQUETAS_TOTAL_OPERACION and resultado["total"] is None:
+                        resultado["total"] = total_encontrado
                 break
 
             tarjeta = (fila.get(columna_tarjeta, "") if columna_tarjeta else "").lstrip("'").strip()
@@ -249,6 +304,15 @@ def leer_excel_convenia(datos: bytes) -> dict:
                 if campo in ("importe", "retencion", "pago_final"):
                     registro[campo] = a_numero(fila.get(columna))
 
+            # Los formatos sencillos sólo traen IMPORTE. En ellos ese importe
+            # ya es lo que se deposita; si además hubiera retención, se descuenta.
+            # Cuando existe una columna explícita de PAGO FINAL no se rellena:
+            # un hueco ahí significa que esa persona no se dispersa este periodo.
+            if not tiene_pago_final and registro["importe"] is not None:
+                registro["pago_final"] = round(
+                    registro["importe"] - (registro["retencion"] or 0.0), 2
+                )
+
             if re.fullmatch(r"\d{6,20}", tarjeta):
                 resultado["detalle"].append(registro)
             elif _persona_sin_tarjeta(registro):
@@ -258,6 +322,15 @@ def leer_excel_convenia(datos: bytes) -> dict:
                 resultado["sin_tarjeta"].append(registro)
 
         if resultado["detalle"] or resultado["sin_tarjeta"]:
+            if resultado["total_dispersion"] is None:
+                resultado["total_dispersion"] = _total_calculado(
+                    resultado["detalle"] + resultado["sin_tarjeta"]
+                )
+                if resultado["total_dispersion"] is not None:
+                    resultado["avisos"].append(
+                        "El archivo no traía un total de dispersión reconocible; "
+                        "lo calculé sumando el detalle."
+                    )
             break
 
     if resultado["total"] is None and resultado["total_dispersion"] is not None:
