@@ -404,15 +404,20 @@ def detectar_cuentas_nuevas(
             encabezados.setdefault(encabezado, celda.column)
     columna_clave = encabezados["clave"]
     columna_clabe = encabezados["clabe interbancaria"]
+    columna_nombre = encabezados["nombre"]
     claves_catalogo: set[str] = set()
     clabes_catalogo: set[str] = set()
+    nombres_catalogo: set[str] = set()
     for valores in hoja.iter_rows(min_row=2, values_only=True):
         clave = _limpiar_clave(valores[columna_clave - 1])
         clabe = _normalizar_cuenta(valores[columna_clabe - 1])
+        nombre = _texto_normalizado(valores[columna_nombre - 1])
         if clave:
             claves_catalogo.add(clave.casefold())
         if clabe:
             clabes_catalogo.add(clabe)
+        if nombre:
+            nombres_catalogo.add(nombre)
 
     filas: list[dict[str, object]] = []
     for registro in tabla_origen.to_dict("records"):
@@ -420,11 +425,14 @@ def detectar_cuentas_nuevas(
         if _texto_normalizado(clave) == "s n":
             continue
         clabe = _normalizar_cuenta(registro["No. Cuenta"])
+        nombre = _texto_normalizado(registro["Nombre"])
         motivos: list[str] = []
         if clave.casefold() not in claves_catalogo:
             motivos.append("Clave no encontrada")
         if clabe not in clabes_catalogo:
             motivos.append("CLABE no encontrada")
+        if nombre not in nombres_catalogo:
+            motivos.append("Nombre no encontrado")
         if not motivos:
             continue
         filas.append(
@@ -2231,7 +2239,7 @@ def vista_litografia() -> None:
 
     st.subheader("Cuentas nuevas")
     st.caption(
-        "Incluye registros cuya clave original o CLABE no existe en el Catálogo. "
+        "Incluye registros cuya clave original, CLABE o nombre no existe en el Catálogo. "
         "Las claves S/N se excluyen de esta validación."
     )
     if tabla_cuentas_nuevas.empty:
