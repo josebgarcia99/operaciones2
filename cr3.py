@@ -2746,7 +2746,7 @@ def seccion_cruce(acumulados):
         st.download_button(
             "Descargar este cruce en CSV",
             data=cruce[COLS_CRUCE].to_csv(index=False).encode("utf_8_sig"),
-            file_name=f"cruce_{os.path.splitext(nombre_excel)[0]}.csv",
+            file_name=f"cruce_{os.path.splitext(nombre_excel)[0]}_layout.csv",
             mime="text/csv",
             key=f"csv_{nombre_excel}",
             icon=sio_tema.ICONO["descargar"],
@@ -2922,7 +2922,7 @@ def bloque_concentrado(excels, acumulados, cruces):
     st.download_button(
         f"Descargar concentrado ({len(bloques)} cliente(s))",
         data=contenido,
-        file_name=f"acumulado_conv_{date.today():%d%m%Y}.xlsx",
+        file_name=f"acumulado_conv_{date.today():%d%m%Y}_layout.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="descarga_concentrado",
         icon=sio_tema.ICONO["descargar"],
@@ -3012,7 +3012,7 @@ def bloque_carga_masiva(excels, acumulados, cruces):
         paquete.append({
             "cliente": cliente,
             "excel": nombre_excel,
-            "archivo": f"formato_carga_{etiqueta}.xlsx",
+            "archivo": f"formato_carga_{etiqueta}_layout.xlsx",
             "filas": filas,
             "contenido": escribir_carga_masiva(filas, concepto),
         })
@@ -3045,7 +3045,7 @@ def bloque_carga_masiva(excels, acumulados, cruces):
         st.download_button(
             f"Descargar los {len(paquete)} formatos en un ZIP",
             data=memoria.getvalue(),
-            file_name=f"formatos_carga_{date.today():%d%m%Y}.zip",
+            file_name=f"formatos_carga_{date.today():%d%m%Y}_layout.zip",
             mime="application/zip",
             key="carga_zip",
             icon=sio_tema.ICONO["descargar"],
@@ -3067,24 +3067,53 @@ def operaciones_desde_excels(excels):
     """
     operaciones, avisos = [], []
     for nombre_excel, datos in excels:
-        detalle = [r for r in datos.get("detalle", []) if (r.get("pago_final") or 0)]
-        if not detalle and datos.get("total_dispersion") is None:
+        # Importe a Repartir es el bruto: no se pueden descartar los renglones
+        # cuyo pago final quedó en cero, porque precisamente pueden representar
+        # un descuento o una retención por el importe completo.
+        detalle = list(datos.get("detalle", []))
+        sin_tarjeta = list(datos.get("sin_tarjeta", []))
+        renglones = detalle + sin_tarjeta
+        if not renglones and datos.get("total_dispersion") is None:
             continue
 
-        importes = sum(r.get("importe") or 0 for r in detalle)
-        retenciones = sum(r.get("retencion") or 0 for r in detalle)
+        importes = sum(r.get("importe") or 0 for r in renglones)
+        retenciones = sum(r.get("retencion") or 0 for r in renglones)
         pagado = sum(r.get("pago_final") or 0 for r in detalle)
+        en_resguardo = sum(
+            r.get("pago_final")
+            if r.get("pago_final") is not None
+            else (r.get("importe") or 0) - (r.get("retencion") or 0)
+            for r in sin_tarjeta
+        )
 
         total = datos.get("total_dispersion")
-        a_repartir = round(float(total) if total is not None else importes, 2)
-        real = round(pagado, 2) if detalle else a_repartir
+        tiene_importes_brutos = any(r.get("importe") is not None for r in renglones)
+        a_repartir = round(
+            importes
+            if tiene_importes_brutos
+            else float(total) if total is not None else 0.0,
+            2,
+        )
+        # Sólo el detalle con tarjeta puede dispersarse. Las personas sin
+        # tarjeta forman parte del bruto, pero su neto queda en resguardo.
+        real = round(pagado, 2) if renglones else a_repartir
         etiqueta = datos.get("cliente") or nombre_excel
 
         if retenciones:
+            complemento = (
+                f" También hay {en_resguardo:,.2f} sin tarjeta en resguardo."
+                if en_resguardo
+                else ""
+            )
             avisos.append(
                 f"'{etiqueta}': el Excel trae retenciones por {retenciones:,.2f}. "
                 f"REAL A DISPERSAR queda en {real:,.2f} y esa diferencia es la que "
-                "aparece como DEVOLUCIONES."
+                f"aparece como DEVOLUCIONES.{complemento}"
+            )
+        elif en_resguardo:
+            avisos.append(
+                f"'{etiqueta}': hay {en_resguardo:,.2f} sin tarjeta; forma parte del "
+                "importe bruto, pero no de REAL A DISPERSAR y queda en resguardo."
             )
         elif abs(a_repartir - real) >= 0.01:
             # Sin retenciones los dos deberían coincidir; si no, algo no cuadra
@@ -3160,7 +3189,7 @@ def bloque_operaciones(excels):
     st.download_button(
         f"Descargar CR3 CONV ({len(operaciones)} operación(es))",
         data=contenido,
-        file_name=f"cr3_conv_{date.today():%d%m%Y}.xlsx",
+        file_name=f"cr3_conv_{date.today():%d%m%Y}_layout.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="descarga_operaciones",
         icon=sio_tema.ICONO["descargar"],
@@ -3257,7 +3286,7 @@ def vista_completa():
             st.download_button(
                 "Descargar archivo .txt para Banxico",
                 data=txt_content,
-                file_name="transferencias_cep.txt",
+                file_name="transferencias_cep_layout.txt",
                 mime="text/plain",
                 disabled=valid_lines == 0,
                 icon=sio_tema.ICONO["descargar"],
@@ -3278,7 +3307,7 @@ def vista_completa():
             st.download_button(
                 "Descargar instrucciones + catálogo",
                 data=INSTRUCCIONES + render_bank_reference(),
-                file_name="instrucciones_banxico_cep.txt",
+                file_name="instrucciones_banxico_cep_layout.txt",
                 mime="text/plain",
                 icon=sio_tema.ICONO["descargar"],
             )
