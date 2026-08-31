@@ -21,6 +21,7 @@ contra la Suma localizada en cada hoja de detalle (`litografia.py`).
 
 import cr3
 import litografia
+import alimentos
 import sio_tema
 import streamlit as st
 
@@ -91,11 +92,12 @@ def vista_banxico():
     st.code(txt_content or "Aún no hay renglones válidos.", language="text")
 
 
-tab_banxico, tab_completo, tab_litografia = st.tabs(
+tab_banxico, tab_completo, tab_litografia, tab_alimentos = st.tabs(
     [
         f"{sio_tema.ICONO['verificar']} Verificar en Banxico",
         f"{sio_tema.ICONO['recibo']} cr3",
         "Litografía",
+        "Alimentos",
     ]
 )
 
@@ -107,5 +109,8 @@ with tab_completo:
 
 with tab_litografia:
     litografia.vista_litografia()
+
+with tab_alimentos:
+    alimentos.vista_alimentos()
 
 sio_tema.pie()
