@@ -2705,7 +2705,13 @@ def seccion_cruce(acumulados):
                 "en_base": bool(ficha),
             })
 
-        cruce = pd.DataFrame(filas_cruce)
+        # Un Excel puede no dejar renglones para dispersar (por ejemplo, si
+        # todos quedaron en resguardo). En ese caso ``filas_cruce`` está vacío
+        # y pandas crearía un DataFrame sin columnas; al seleccionar
+        # COLS_CRUCE se producía un KeyError justo después de cargar la base.
+        # Conservamos siempre el esquema para que el cruce vacío sea válido y
+        # no impida procesar los demás archivos.
+        cruce = pd.DataFrame(filas_cruce, columns=COLS_CRUCE + ["en_base"])
         cruces[nombre_excel] = cruce[COLS_CRUCE]
 
         st.markdown(f"##### {nombre_excel}")

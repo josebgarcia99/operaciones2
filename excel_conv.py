@@ -123,7 +123,7 @@ ALIAS_NOMBRE = (
 ALIAS_TARJETA = (
     "TARJETA", "NOTARJETA", "NUMTARJETA", "NUMEROTARJETA", "TARJETAMONEDERO",
     # Algunos archivos titulan la misma columna de monedero como cuenta.
-    "CUENTABANCARIA",
+    "CUENTABANCARIA", "CUENTACONVENIA",
 )
 ALIAS_IMPORTE = ("IMPORTE", "IMPORTEBRUTO", "BRUTO")
 ALIAS_RETENCION = (
@@ -132,7 +132,7 @@ ALIAS_RETENCION = (
 # Última columna del detalle: cada archivo la nombra distinto.
 ALIAS_PAGO_FINAL = (
     "PAGOFINAL", "DEPOSITOFINAL", "IMPORTENETOAPAGAR", "IMPORTENETO",
-    "NETOAPAGAR", "NETO", "TOTAL", "PAGO", "DEPOSITO",
+    "NETOAPAGAR", "NETO", "TOTAL", "PAGO", "DEPOSITO", "SALDOADEPOSITAR",
 )
 
 # Se recorre en este orden y el primer alias que empate se queda la columna.
