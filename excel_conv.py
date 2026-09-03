@@ -51,7 +51,7 @@ def _columna(ref: str) -> str:
     return re.match(r"[A-Z]+", ref).group(0)
 
 
-def _leer_hojas(datos: bytes):
+def _leer_hojas(datos: bytes, solo_visibles: bool = False):
     """[(nombre de hoja, [fila, ...])] donde fila es {columna: valor}."""
     z = zipfile.ZipFile(io.BytesIO(datos))
     compartidas = []
@@ -65,6 +65,9 @@ def _leer_hojas(datos: bytes):
 
     hojas = []
     for hoja in libro.iter(NS + "sheet"):
+        estado = hoja.get("state", "visible")
+        if solo_visibles and estado != "visible":
+            continue
         destino = rels.get(hoja.get(REL + "id"), "").lstrip("/")
         if not destino:
             continue
@@ -212,8 +215,8 @@ def _persona_sin_tarjeta(registro: dict) -> bool:
     return any((registro.get(campo) or 0) for campo in ("importe", "retencion", "pago_final"))
 
 
-def leer_excel_convenia(datos: bytes) -> dict:
-    """Encabezado + detalle del primer hoja que traiga la tabla de dispersión."""
+def _leer_excel_desde_hojas(hojas) -> dict:
+    """Encabezado + detalle de la primera hoja recibida que tenga dispersión."""
     resultado = {
         "cliente": "", "proveedor": "", "cuenta_bancaria": "", "periodo": "",
         "total": None, "hoja": "", "detalle": [], "total_dispersion": None,
@@ -224,7 +227,7 @@ def leer_excel_convenia(datos: bytes) -> dict:
         "avisos": [],
     }
 
-    for nombre_hoja, filas in _leer_hojas(datos):
+    for nombre_hoja, filas in hojas:
         fila_encabezado = None
         for indice, fila in enumerate(filas):
             campos = {_campo_de_encabezado(v) for v in fila.values()}
@@ -267,6 +270,27 @@ def leer_excel_convenia(datos: bytes) -> dict:
                     resultado["periodo"] = periodo
                     break
 
+        # En algunos libros el total de la operación no está junto a PERIODO:
+        # vive al final de cada hoja, después de comisión, subtotal e IVA. Se
+        # distingue de TOTAL DISPERSIÓN para no confundir el neto con la factura.
+        if resultado["total"] is None:
+            total_cierre = None
+            for fila in filas[fila_encabezado + 1:]:
+                etiquetas = [normalizar_nombre(v) for v in fila.values()]
+                es_total_final = any(
+                    etiqueta.startswith("TOTAL")
+                    and etiqueta not in ETIQUETAS_TOTAL_DISPERSION
+                    for etiqueta in etiquetas
+                )
+                if not es_total_final:
+                    continue
+                numeros = [a_numero(v) for v in fila.values()]
+                numeros = [n for n in numeros if n is not None]
+                if numeros:
+                    total_cierre = round(max(numeros), 2)
+            if total_cierre is not None:
+                resultado["total"] = total_cierre
+
         # Mapa columna -> campo, a partir del renglón de encabezados.
         mapa = {}
         for columna, valor in filas[fila_encabezado].items():
@@ -293,7 +317,7 @@ def leer_excel_convenia(datos: bytes) -> dict:
                         resultado["total"] = total_encontrado
                 break
 
-            tarjeta = (fila.get(columna_tarjeta, "") if columna_tarjeta else "").lstrip("'").strip()
+            tarjeta = (fila.get(columna_tarjeta, "") if columna_tarjeta else "").lstrip("'\"").strip()
             nombre = (fila.get(columna_nombre, "") if columna_nombre else "").strip()
             if not nombre:
                 continue
@@ -338,6 +362,25 @@ def leer_excel_convenia(datos: bytes) -> dict:
             "No encontré el total de la operación junto a PERIODO; solo el total de dispersión."
         )
     return resultado
+
+
+def leer_excel_convenia(datos: bytes) -> dict:
+    """Compatibilidad: lee la primera tabla válida, como desde el inicio."""
+    return _leer_excel_desde_hojas(_leer_hojas(datos))
+
+
+def leer_excels_convenia(datos: bytes) -> list[dict]:
+    """Lee una operación por cada hoja visible que contenga movimientos.
+
+    Los libros normales siguen produciendo un solo elemento. Las hojas con
+    estado ``hidden`` o ``veryHidden`` nunca entran al proceso.
+    """
+    resultados = []
+    for nombre_hoja, filas in _leer_hojas(datos, solo_visibles=True):
+        resultado = _leer_excel_desde_hojas([(nombre_hoja, filas)])
+        if resultado["detalle"] or resultado["sin_tarjeta"]:
+            resultados.append(resultado)
+    return resultados
 
 
 # --------------------------------------------------------------------------- #

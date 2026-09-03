@@ -80,11 +80,13 @@ else:
     CEP_IMPORT_ERROR = ""
 
 try:
-    from excel_conv import (leer_excel_convenia, leer_base_tarjetas, normalizar_nombre,
+    from excel_conv import (leer_excel_convenia, leer_excels_convenia,
+                            leer_base_tarjetas, normalizar_nombre,
                             a_numero, escribir_acumulado_xlsx, escribir_operaciones_xlsx,
                             escribir_carga_masiva)
 except Exception as _exc:  # pragma: no cover
     leer_excel_convenia = None
+    leer_excels_convenia = None
     EXCEL_IMPORT_ERROR = str(_exc)
 else:
     EXCEL_IMPORT_ERROR = ""
@@ -2787,7 +2789,22 @@ def seccion_excel(records, debug):
     excels = []
     for archivo in excel_files or []:
         try:
-            excels.append((archivo.name, leer_excel_convenia(archivo.getvalue())))
+            operaciones = (
+                leer_excels_convenia(archivo.getvalue())
+                if leer_excels_convenia is not None
+                else [leer_excel_convenia(archivo.getvalue())]
+            )
+            if not operaciones:
+                st.warning(f"'{archivo.name}': no encontré movimientos en sus hojas visibles.")
+                continue
+            varias_hojas = len(operaciones) > 1
+            for datos in operaciones:
+                base_nombre, extension = os.path.splitext(archivo.name)
+                nombre_operacion = (
+                    f"{base_nombre} — {datos.get('hoja', 'Hoja')}{extension}"
+                    if varias_hojas else archivo.name
+                )
+                excels.append((nombre_operacion, datos))
         except Exception as exc:  # noqa: BLE001
             st.error(f"'{archivo.name}': no se pudo leer ({exc})")
 
